@@ -55,9 +55,51 @@ python -m app.main --no-bot   # только веб-сервер (для деп�
 
 1. **Создать бота** (если ещё нет): `/newbot`, скопировать токен в `BOT_TOKEN`.
 2. **Включить inline-режим**: `/mybots` → бот → `Bot Settings` → `Inline Mode` → `Turn on`. Опционально задать `Inline Placeholder` (например `Спросить zabolotAI…`).
-3. **Web App**:
+3. **Включить inline-feedback** (обязательно для inline!): `/setinlinefeedback` → выбрать бота → `100%`. Без этого бот не узнаёт, что юзер выбрал inline-результат, и сообщение в чате останется с заглушкой «🤔 думаю…». Архитектура inline-режима: бот моментально отвечает плейсхолдером (так успевает в 10-секундный лимит Telegram), а после выбора пользователем дописывает ответ AI через `edit_message_text`.
+4. **Web App**:
    - Задеплой `webapp_static/` куда-нибудь по HTTPS (или используй встроенный сервер за HTTPS-прокси).
    - В `/mybots` → бот → `Bot Settings` → `Menu Button` → задай текст и URL → этот же URL впиши в `.env` как `WEBAPP_URL`. После рестарта в `/start` появится кнопка «🚀 Открыть веб-приложение».
+
+## Постоянный хостинг («работает вечно»)
+
+В репо есть готовые конфиги для нескольких бесплатных хостингов:
+
+### Вариант 1: Docker на любом VPS
+
+```bash
+# на сервере
+git clone https://github.com/<owner>/zabolot-bot.git && cd zabolot-bot
+cp .env.example .env && nano .env   # вписать токен и ключи
+docker compose up -d
+```
+
+`restart: always` в `docker-compose.yml` поднимает контейнер при падении и при ребуте сервера.
+
+### Вариант 2: Fly.io (есть бесплатный тариф)
+
+```bash
+# один раз
+curl -L https://fly.io/install.sh | sh
+fly auth login
+fly launch --no-deploy --copy-config
+# секреты
+fly secrets set BOT_TOKEN=... \
+  CANOPYWAVE_API_KEY=... \
+  VISION_API_KEY=... \
+  VISION_BASE_URL=https://openrouter.ai/api/v1 \
+  VISION_MODEL=nvidia/nemotron-nano-12b-v2-vl:free \
+  WEBAPP_URL=https://<твоё-имя>.fly.dev
+fly deploy
+```
+
+После `fly deploy` URL `https://<имя>.fly.dev` нужно вписать в @BotFather → `Bot Settings` → `Menu Button` (Web App).
+
+### Вариант 3: Render.com / Railway
+
+Подключи репо как Web Service, укажи:
+- Build command: `pip install .`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Env vars: те же, что в `.env.example`
 
 ## Переменные окружения
 
