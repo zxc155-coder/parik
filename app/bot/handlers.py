@@ -12,6 +12,7 @@ from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    ChosenInlineResult,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQuery,
@@ -28,6 +29,30 @@ logger = logging.getLogger(__name__)
 # Per-chat rolling history of recent messages (text only). Keeps memory bounded.
 _HISTORY_MAX = 12
 _history: dict[int, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=_HISTORY_MAX))
+
+# Cache mapping inline result_id -> (query_text, expires_at). The chosen_inline_result
+# handler reads from here to look up the original question. ~5 min TTL.
+_inline_cache: dict[str, tuple[str, float]] = {}
+_INLINE_TTL = 300.0
+
+
+def _inline_cache_set(result_id: str, query: str) -> None:
+    import time as _t
+
+    _inline_cache[result_id] = (query, _t.time() + _INLINE_TTL)
+    # Cheap GC
+    if len(_inline_cache) > 500:
+        now = _t.time()
+        for k in list(_inline_cache.keys()):
+            if _inline_cache[k][1] < now:
+                _inline_cache.pop(k, None)
+
+
+def _inline_cache_pop(result_id: str) -> str | None:
+    item = _inline_cache.pop(result_id, None)
+    if not item:
+        return None
+    return item[0]
 
 
 def _push(chat_id: int, role: str, content: str) -> None:
@@ -167,45 +192,88 @@ def build_router(
 
     @router.inline_query()
     async def on_inline(query: InlineQuery) -> None:
+        """Answer inline queries instantly with a placeholder; the AI call happens
+        in `on_chosen_inline_result`, which then edits the resulting chat message."""
         if not _is_allowed(query.from_user.id, allowed):
             await query.answer(results=[], cache_time=1, is_personal=True)
             return
         q = (query.query or "").strip()
         if not q:
-            placeholder = InlineQueryResultArticle(
+            empty = InlineQueryResultArticle(
                 id="empty",
                 title="Введите вопрос…",
                 description="@zabolotrobot ваш вопрос",
                 input_message_content=InputTextMessageContent(
-                    message_text="Использование: @zabolotrobot ваш вопрос"
+                    message_text="Использование: @zabolotrobot <ваш вопрос>"
                 ),
             )
-            await query.answer(results=[placeholder], cache_time=1, is_personal=True)
+            try:
+                await query.answer(results=[empty], cache_time=1, is_personal=True)
+            except TelegramBadRequest:
+                pass
+            return
+
+        # Stable result_id derived from the query so duplicate inline_queries don't
+        # generate new placeholders for the same prompt within Telegram's cache window.
+        result_id = hashlib.md5(q.encode("utf-8")).hexdigest()[:32]
+        _inline_cache_set(result_id, q)
+
+        placeholder_text = f"<b>❓ {_escape_html(q)}</b>\n\n🤔 <i>zabolotAI думает…</i>"
+        result = InlineQueryResultArticle(
+            id=result_id,
+            title=f"Спросить zabolotAI: {q[:55]}",
+            description="MiniMax M2.5 ответит прямо в чате",
+            input_message_content=InputTextMessageContent(
+                message_text=placeholder_text,
+                parse_mode="HTML",
+            ),
+        )
+        try:
+            await query.answer(results=[result], cache_time=0, is_personal=True)
+        except TelegramBadRequest as exc:
+            logger.warning("inline answer failed: %s", exc)
+
+    @router.chosen_inline_result()
+    async def on_chosen_inline_result(chosen: ChosenInlineResult, bot: Bot) -> None:
+        """User picked our inline result — now actually call the AI and edit the message."""
+        if not _is_allowed(chosen.from_user.id, allowed):
+            return
+        inline_message_id = chosen.inline_message_id
+        if not inline_message_id:
+            logger.warning("chosen_inline_result without inline_message_id (chat-bound chat?)")
+            return
+
+        # Prefer cached query; fall back to chosen.query (Telegram passes it through).
+        q = _inline_cache_pop(chosen.result_id) or (chosen.query or "").strip()
+        if not q:
+            try:
+                await bot.edit_message_text(
+                    inline_message_id=inline_message_id,
+                    text="(пустой запрос)",
+                )
+            except TelegramBadRequest:
+                pass
             return
 
         try:
-            answer = await ai.chat([{"role": "user", "content": q}])
+            answer = await ai.chat([{"role": "user", "content": q}], max_tokens=900)
         except Exception as exc:
-            logger.exception("inline call failed")
-            answer = f"⚠️ Ошибка: {exc}"
+            logger.exception("inline AI call failed")
+            answer = f"⚠️ Ошибка нейросети: {exc}"
 
         if not answer:
             answer = "(пустой ответ)"
 
-        # Telegram message limit ~4096 chars
-        truncated = answer if len(answer) <= 3900 else answer[:3900] + "…"
-        result_id = hashlib.md5(f"{query.id}:{q}".encode()).hexdigest()[:32]
-        # Show preview in title with the question, full answer in description and message
-        result = InlineQueryResultArticle(
-            id=result_id,
-            title=f"Ответ на: {q[:60]}",
-            description=truncated[:120],
-            input_message_content=InputTextMessageContent(
-                message_text=f"<b>❓ {_escape_html(q)}</b>\n\n{_escape_html(truncated)}",
+        truncated = answer if len(answer) <= 3800 else answer[:3800] + "…"
+        text = f"<b>❓ {_escape_html(q)}</b>\n\n{_escape_html(truncated)}"
+        try:
+            await bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text=text,
                 parse_mode="HTML",
-            ),
-        )
-        await query.answer(results=[result], cache_time=0, is_personal=True)
+            )
+        except TelegramBadRequest as exc:
+            logger.warning("edit_message_text failed: %s", exc)
 
     return router
 
