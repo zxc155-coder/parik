@@ -73,6 +73,9 @@ class CanopyWaveClient:
         vision_model: str = "zai/glm-5.1",
         vision_api_key: str | None = None,
         vision_base_url: str | None = None,
+        inline_model: str = "openai/gpt-oss-20b:free",
+        inline_api_key: str | None = None,
+        inline_base_url: str | None = None,
         timeout: float = 120.0,
     ) -> None:
         self.api_key = api_key
@@ -81,6 +84,14 @@ class CanopyWaveClient:
         self.vision_model = vision_model
         self.vision_api_key = (vision_api_key or "").strip() or api_key
         self.vision_base_url = ((vision_base_url or "").strip() or base_url).rstrip("/")
+        # Inline routing defaults to the vision provider (typically OpenRouter)
+        # because that's where the FAST free models live; override individually
+        # via INLINE_API_KEY / INLINE_BASE_URL env if you want a third provider.
+        self.inline_model = inline_model
+        self.inline_api_key = (inline_api_key or "").strip() or self.vision_api_key
+        self.inline_base_url = (
+            (inline_base_url or "").strip() or self.vision_base_url
+        ).rstrip("/")
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={"Content-Type": "application/json"},
@@ -112,6 +123,35 @@ class CanopyWaveClient:
             "max_tokens": max_tokens,
         }
         return await self._call(payload, base_url=self.base_url, api_key=self.api_key)
+
+    async def chat_inline(
+        self,
+        query: str,
+        *,
+        max_tokens: int = 400,
+        timeout: float = 8.0,
+    ) -> str:
+        """Fast, single-shot completion for inline queries.
+
+        Uses the inline model + provider (typically OpenRouter `gpt-oss-20b:free`)
+        and applies a tight per-call timeout so we always respond inside Telegram's
+        ~10s inline_query window.
+        """
+        payload = {
+            "model": self.inline_model,
+            "messages": [
+                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                {"role": "user", "content": query},
+            ],
+            "temperature": 0.5,
+            "max_tokens": max_tokens,
+        }
+        return await self._call(
+            payload,
+            base_url=self.inline_base_url,
+            api_key=self.inline_api_key,
+            timeout=timeout,
+        )
 
     async def chat_with_image(
         self,
@@ -155,13 +195,21 @@ class CanopyWaveClient:
             api_key=self.vision_api_key,
         )
 
-    async def _call(self, payload: dict[str, Any], *, base_url: str, api_key: str) -> str:
+    async def _call(
+        self,
+        payload: dict[str, Any],
+        *,
+        base_url: str,
+        api_key: str,
+        timeout: float | None = None,
+    ) -> str:
         url = f"{base_url}/chat/completions"
         try:
             resp = await self._client.post(
                 url,
                 json=payload,
                 headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout if timeout is not None else self._client.timeout,
             )
         except httpx.HTTPError as exc:
             logger.error("HTTP error calling AI: %s", exc)

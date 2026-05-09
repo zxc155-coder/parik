@@ -65,6 +65,9 @@ def _build_app() -> FastAPI:
         vision_model=settings.vision_model,
         vision_api_key=settings.vision_api_key,
         vision_base_url=settings.vision_base_url,
+        inline_model=settings.inline_model,
+        inline_api_key=settings.inline_api_key,
+        inline_base_url=settings.inline_base_url,
     )
 
     static_dir = Path(__file__).resolve().parent.parent / "webapp_static"

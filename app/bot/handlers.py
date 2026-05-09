@@ -23,7 +23,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from app.ai_client import AIError, CanopyWaveClient
+from app.ai_client import AIError, CanopyWaveClient, clean_response
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +206,16 @@ def build_router(
 
     @router.inline_query()
     async def on_inline(query: InlineQuery) -> None:
-        """Answer inline queries instantly with a placeholder; the AI call happens
-        in `on_chosen_inline_result`, which then edits the resulting chat message."""
+        """Answer inline queries directly with the AI's response.
+
+        We call the FAST inline model (typically `openai/gpt-oss-20b:free`) with a
+        tight timeout so the answer fits inside Telegram's ~10s inline_query window.
+        The user sees the full answer immediately upon picking the suggestion — no
+        chosen_inline_result / setinlinefeedback dance required.
+
+        On timeout / API error, we fall back to the placeholder + chosen_inline_result
+        pattern (still works if the user has /setinlinefeedback enabled).
+        """
         if not _is_allowed(query.from_user.id, allowed):
             await query.answer(results=[], cache_time=1, is_personal=True)
             return
@@ -230,18 +238,39 @@ def build_router(
         # Stable result_id derived from the query so duplicate inline_queries don't
         # generate new placeholders for the same prompt within Telegram's cache window.
         result_id = hashlib.md5(q.encode("utf-8")).hexdigest()[:32]
-        _inline_cache_set(result_id, q)
 
-        placeholder_text = f"<b>❓ {_escape_html(q)}</b>\n\n🤔 <i>zabolotAI думает…</i>"
-        result = InlineQueryResultArticle(
-            id=result_id,
-            title=f"Спросить zabolotAI: {q[:55]}",
-            description="MiniMax M2.5 ответит прямо в чате",
-            input_message_content=InputTextMessageContent(
-                message_text=placeholder_text,
-                parse_mode="HTML",
-            ),
-        )
+        answer_text: str | None = None
+        try:
+            raw = await ai.chat_inline(q, max_tokens=400, timeout=8.0)
+            answer_text = clean_response(raw)
+        except Exception as exc:
+            logger.warning("inline fast call failed (%s) — falling back to placeholder", exc)
+
+        if answer_text:
+            truncated = answer_text if len(answer_text) <= 3800 else answer_text[:3800] + "…"
+            text = f"<b>❓ {_escape_html(q)}</b>\n\n{_escape_html(truncated)}"
+            result = InlineQueryResultArticle(
+                id=result_id,
+                title=f"Ответ: {answer_text[:55]}",
+                description=f"❓ {q[:80]}",
+                input_message_content=InputTextMessageContent(
+                    message_text=text,
+                    parse_mode="HTML",
+                ),
+            )
+        else:
+            # Fallback: placeholder + chosen_inline_result (requires /setinlinefeedback)
+            _inline_cache_set(result_id, q)
+            placeholder_text = f"<b>❓ {_escape_html(q)}</b>\n\n🤔 <i>zabolotAI думает…</i>"
+            result = InlineQueryResultArticle(
+                id=result_id,
+                title=f"Спросить zabolotAI: {q[:55]}",
+                description="zabolotAI ответит прямо в чате",
+                input_message_content=InputTextMessageContent(
+                    message_text=placeholder_text,
+                    parse_mode="HTML",
+                ),
+            )
         try:
             await query.answer(results=[result], cache_time=0, is_personal=True)
         except TelegramBadRequest as exc:

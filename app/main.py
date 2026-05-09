@@ -84,6 +84,9 @@ async def amain(*, run_bot: bool = True, run_web: bool = True) -> None:
         vision_model=settings.vision_model,
         vision_api_key=settings.vision_api_key,
         vision_base_url=settings.vision_base_url,
+        inline_model=settings.inline_model,
+        inline_api_key=settings.inline_api_key,
+        inline_base_url=settings.inline_base_url,
     )
 
     tasks: list[asyncio.Task] = []

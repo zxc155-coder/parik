@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     vision_api_key: str = Field(default="")
     vision_base_url: str = Field(default="")
 
+    # Inline mode uses a deliberately FAST model so we answer within Telegram's
+    # ~10s inline_query timeout. By default we route inline through the same
+    # vision provider (OpenRouter has good free fast models). Override per env.
+    inline_model: str = Field(default="openai/gpt-oss-20b:free")
+    inline_api_key: str = Field(default="")
+    inline_base_url: str = Field(default="")
+    inline_timeout: float = Field(default=8.0)
+
     webapp_url: str = Field(default="", description="Public HTTPS URL of the Web App")
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
