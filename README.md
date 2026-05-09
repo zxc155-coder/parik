@@ -94,12 +94,20 @@ fly deploy
 
 После `fly deploy` URL `https://<имя>.fly.dev` нужно вписать в @BotFather → `Bot Settings` → `Menu Button` (Web App).
 
-### Вариант 3: Render.com / Railway
+### Вариант 3: Render.com (рекомендуется, есть бесплатный тариф)
 
-Подключи репо как Web Service, укажи:
+Можно поднять как через Dashboard, так и через API:
+
 - Build command: `pip install .`
-- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-- Env vars: те же, что в `.env.example`
+- Start command: `uvicorn app.asgi:app --host 0.0.0.0 --port $PORT --proxy-headers`
+- Python version: `3.11.9`
+- Env vars: всё из `.env.example` плюс `WEBHOOK_BASE_URL` = публичный URL сервиса (например `https://zabolot-bot.onrender.com`) и `WEBHOOK_SECRET` (любая случайная строка). При установленном `WEBHOOK_BASE_URL` бот переходит в режим **webhook** вместо long-polling — это нужно на бесплатном тарифе Render, потому что free-инстансы засыпают после 15 минут без HTTP-трафика; при webhook-режиме каждое сообщение от Telegram = входящий POST, который не даёт сервису уснуть.
+
+В режиме webhook эндпоинт `<url>/webhook` принимает обновления Telegram, проверяет `X-Telegram-Bot-Api-Secret-Token` и передаёт их в aiogram dispatcher. Регистрация webhook'а в Telegram происходит автоматически при старте процесса.
+
+### Вариант 4: Railway
+
+Аналогично варианту Render — `pip install .` + `uvicorn app.asgi:app --host 0.0.0.0 --port $PORT`.
 
 ## Переменные окружения
 
@@ -112,7 +120,12 @@ fly deploy
 | `VISION_MODEL` | По умолчанию `zai/glm-5.1` |
 | `VISION_API_KEY` | (опц.) ключ отдельного vision-провайдера (например OpenRouter). Если пусто — используется `CANOPYWAVE_API_KEY` |
 | `VISION_BASE_URL` | (опц.) base URL отдельного vision-провайдера, например `https://openrouter.ai/api/v1` |
+| `INLINE_MODEL` | По умолчанию `openai/gpt-oss-20b:free` — быстрая модель для inline-запросов (укладывается в 10-сек таймаут Telegram). |
+| `INLINE_API_KEY` / `INLINE_BASE_URL` | (опц.) свой провайдер для inline. По умолчанию reuses `VISION_*`. |
 | `WEBAPP_URL` | Публичный HTTPS-URL Web App (для кнопки в `/start`) |
+| `WEBHOOK_BASE_URL` | (опц.) Публичный HTTPS-URL сервиса. Если задан — бот регистрирует Telegram webhook вместо polling. Рекомендуется для прод-хостинга на Render и подобных. |
+| `WEBHOOK_PATH` | По умолчанию `/webhook` |
+| `WEBHOOK_SECRET` | (опц.) проверяется в заголовке `X-Telegram-Bot-Api-Secret-Token` |
 | `HOST` / `PORT` | Биндинг веб-сервера (по умолчанию `0.0.0.0:8000`) |
 | `ALLOWED_USER_IDS` | Список разрешённых Telegram user id через запятую (пусто = все) |
 
