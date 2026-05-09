@@ -1,8 +1,13 @@
-"""ASGI entry point for production deployments (e.g. uvicorn, Fly.io).
+"""ASGI entry point for production deployments (e.g. uvicorn, Render, Fly.io).
 
-`uvicorn app.asgi:app` serves the FastAPI WebApp on the configured port AND
-spawns the Telegram long-polling bot as a background task during the FastAPI
-lifespan. Both shut down cleanly together.
+`uvicorn app.asgi:app` serves the FastAPI WebApp on the configured port. The
+Telegram bot runs in one of two modes depending on env config:
+
+* **Polling** (default, dev): a background asyncio task long-polls Telegram.
+* **Webhook** (production): when `WEBHOOK_BASE_URL` is set we register a webhook
+  at `<base>/webhook` and a FastAPI route hands incoming updates to the
+  dispatcher. Required for free plans (Render) that spin down on inactivity —
+  every Telegram message becomes an inbound HTTP request that wakes the service.
 """
 
 from __future__ import annotations
@@ -12,11 +17,15 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.types import Update
+from fastapi import FastAPI, Header, HTTPException, Request
 
 from app.ai_client import CanopyWaveClient
 from app.bot.handlers import build_router
-from app.config import load_settings
+from app.config import Settings, load_settings
 from app.webapp.server import create_app
 
 logger = logging.getLogger("zabolot.asgi")
@@ -26,11 +35,7 @@ logging.basicConfig(
 )
 
 
-async def _run_bot_polling(settings, ai: CanopyWaveClient) -> None:
-    from aiogram import Bot, Dispatcher
-    from aiogram.client.default import DefaultBotProperties
-    from aiogram.enums import ParseMode
-
+def _build_bot(settings: Settings, ai: CanopyWaveClient) -> tuple[Bot, Dispatcher]:
     bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -43,9 +48,12 @@ async def _run_bot_polling(settings, ai: CanopyWaveClient) -> None:
             allowed_user_ids=settings.allowed_ids,
         )
     )
+    return bot, dp
 
+
+async def _run_bot_polling(bot: Bot, dp: Dispatcher) -> None:
     me = await bot.get_me()
-    logger.info("Bot started: @%s (id=%s)", me.username, me.id)
+    logger.info("Bot started (polling): @%s (id=%s)", me.username, me.id)
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
@@ -54,6 +62,19 @@ async def _run_bot_polling(settings, ai: CanopyWaveClient) -> None:
         raise
     finally:
         await bot.session.close()
+
+
+async def _setup_webhook(bot: Bot, dp: Dispatcher, settings: Settings) -> None:
+    me = await bot.get_me()
+    base = settings.webhook_base_url.rstrip("/")
+    url = f"{base}{settings.webhook_path}"
+    logger.info("Bot started (webhook): @%s (id=%s) -> %s", me.username, me.id, url)
+    await bot.set_webhook(
+        url=url,
+        secret_token=settings.webhook_secret or None,
+        drop_pending_updates=True,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
 
 
 def _build_app() -> FastAPI:
@@ -71,18 +92,33 @@ def _build_app() -> FastAPI:
     )
 
     static_dir = Path(__file__).resolve().parent.parent / "webapp_static"
+    bot, dp = _build_bot(settings, ai)
+    use_webhook = bool(settings.webhook_base_url.strip())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        bot_task = asyncio.create_task(_run_bot_polling(settings, ai), name="bot-polling")
+        polling_task: asyncio.Task | None = None
+        if use_webhook:
+            await _setup_webhook(bot, dp, settings)
+        else:
+            polling_task = asyncio.create_task(
+                _run_bot_polling(bot, dp), name="bot-polling"
+            )
         try:
             yield
         finally:
-            bot_task.cancel()
-            try:
-                await bot_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            if polling_task is not None:
+                polling_task.cancel()
+                try:
+                    await polling_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            else:
+                try:
+                    await bot.delete_webhook()
+                except Exception:  # noqa: BLE001
+                    logger.exception("delete_webhook failed during shutdown")
+                await bot.session.close()
             await ai.aclose()
 
     fastapi_app = create_app(
@@ -92,6 +128,26 @@ def _build_app() -> FastAPI:
         allowed_user_ids=settings.allowed_ids,
     )
     fastapi_app.router.lifespan_context = lifespan
+
+    if use_webhook:
+
+        @fastapi_app.post(settings.webhook_path)
+        async def telegram_webhook(
+            request: Request,
+            x_telegram_bot_api_secret_token: str | None = Header(default=None),
+        ) -> dict[str, bool]:
+            if settings.webhook_secret:
+                if x_telegram_bot_api_secret_token != settings.webhook_secret:
+                    raise HTTPException(status_code=403, detail="bad secret token")
+            payload = await request.json()
+            try:
+                update = Update.model_validate(payload, context={"bot": bot})
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("invalid update payload: %s", exc)
+                raise HTTPException(status_code=400, detail="bad update") from exc
+            await dp.feed_update(bot, update)
+            return {"ok": True}
+
     return fastapi_app
 
 

@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
 
+    # Webhook mode (production hosting on Render/Heroku/etc.). When `webhook_base_url`
+    # is set, the bot registers a webhook at <base>/webhook instead of long-polling.
+    # Render's free plan spins down on inactivity from incoming HTTP requests, so
+    # webhook mode (which causes Telegram to POST on every update) keeps it warm.
+    webhook_base_url: str = Field(default="")
+    webhook_path: str = Field(default="/webhook")
+    webhook_secret: str = Field(default="")
+
     allowed_user_ids: str = Field(
         default="",
         description="Comma-separated Telegram user IDs allowed to use the bot. Empty = public.",
