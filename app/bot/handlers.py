@@ -12,6 +12,7 @@ from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    CallbackQuery,
     ChosenInlineResult,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -111,14 +112,27 @@ def build_router(
         text += "\nКоманды: /reset — очистить контекст, /help — справка."
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
+    HELP_TEXT = (
+        "Просто напиши вопрос или пришли фото — я отвечу.\n"
+        "В любом другом чате: <code>@zabolotrobot вопрос</code> — мой ответ появится прямо там.\n"
+        "/reset — забыть историю разговора."
+    )
+
     @router.message(Command("help"))
     async def on_help(message: Message) -> None:
-        await message.answer(
-            "Просто напиши вопрос или пришли фото — я отвечу.\n"
-            "В любом другом чате: <code>@zabolotrobot вопрос</code> — мой ответ появится прямо там.\n"
-            "/reset — забыть историю разговора.",
-            parse_mode="HTML",
-        )
+        await message.answer(HELP_TEXT, parse_mode="HTML")
+
+    @router.callback_query(F.data == "help")
+    async def on_help_callback(callback: CallbackQuery) -> None:
+        if callback.message is not None:
+            try:
+                await callback.message.answer(HELP_TEXT, parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
+        try:
+            await callback.answer()
+        except TelegramBadRequest:
+            pass
 
     @router.message(Command("reset"))
     async def on_reset(message: Message) -> None:
@@ -283,19 +297,25 @@ def _escape_html(s: str) -> str:
 
 
 async def _send_long(message: Message, text: str) -> None:
-    """Send `text`, splitting into multiple Telegram messages if too long."""
+    """Send `text`, splitting into multiple Telegram messages if too long.
+
+    The bot is initialised with `parse_mode=HTML` by default, so AI answers
+    that contain unbalanced angle brackets or ampersands trip Telegram's HTML
+    parser. On `TelegramBadRequest` we retry with `parse_mode=None` so the
+    user always receives the raw text instead of nothing.
+    """
     LIMIT = 4000
-    if len(text) <= LIMIT:
+
+    async def _send(chunk: str) -> None:
         try:
-            await message.answer(text)
+            await message.answer(chunk)
         except TelegramBadRequest:
-            # Fallback in case parse mode causes issues
-            await message.answer(text)
+            await message.answer(chunk, parse_mode=None)
+
+    if len(text) <= LIMIT:
+        await _send(text)
         return
-    chunks: list[str] = []
     remaining = text
     while remaining:
-        chunks.append(remaining[:LIMIT])
+        await _send(remaining[:LIMIT])
         remaining = remaining[LIMIT:]
-    for chunk in chunks:
-        await message.answer(chunk)
