@@ -17,6 +17,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -77,6 +78,43 @@ async def _setup_webhook(bot: Bot, dp: Dispatcher, settings: Settings) -> None:
     )
 
 
+def _keepalive_target(settings: Settings) -> str:
+    """Resolve the absolute URL we should self-ping for keep-alive.
+
+    Explicit ``keepalive_url`` wins; otherwise we fall back to the public
+    health endpoint inferred from ``webhook_base_url``. Returns ``""`` when
+    self-pinging should be disabled (local dev / no public URL configured).
+    """
+    if settings.keepalive_url.strip():
+        return settings.keepalive_url.strip()
+    if settings.webhook_base_url.strip():
+        return f"{settings.webhook_base_url.rstrip('/')}/api/health"
+    return ""
+
+
+async def _run_keepalive(url: str, interval: float) -> None:
+    """Periodically GET ``url`` so Render Free doesn't spin the service down.
+
+    Free Render web services sleep after 15 min without inbound HTTP. By having
+    the running service GET its own public health endpoint every ~10 minutes,
+    the request travels back through Render's edge as inbound traffic and resets
+    the idle timer. This is intentionally simple and tolerates transient errors
+    by logging and waiting for the next tick.
+    """
+    logger.info("Keep-alive enabled: pinging %s every %.0fs", url, interval)
+    async with httpx.AsyncClient(timeout=20) as client:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                resp = await client.get(url)
+                logger.info("Keep-alive ping %s -> %d", url, resp.status_code)
+            except asyncio.CancelledError:
+                logger.info("Keep-alive cancelled")
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Keep-alive ping failed: %s", exc)
+
+
 def _build_app() -> FastAPI:
     settings = load_settings()
     ai = CanopyWaveClient(
@@ -98,15 +136,28 @@ def _build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         polling_task: asyncio.Task | None = None
+        keepalive_task: asyncio.Task | None = None
         if use_webhook:
             await _setup_webhook(bot, dp, settings)
         else:
             polling_task = asyncio.create_task(
                 _run_bot_polling(bot, dp), name="bot-polling"
             )
+        ka_url = _keepalive_target(settings)
+        if ka_url:
+            keepalive_task = asyncio.create_task(
+                _run_keepalive(ka_url, settings.keepalive_interval),
+                name="keepalive",
+            )
         try:
             yield
         finally:
+            if keepalive_task is not None:
+                keepalive_task.cancel()
+                try:
+                    await keepalive_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             if polling_task is not None:
                 polling_task.cancel()
                 try:

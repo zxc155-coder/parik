@@ -100,16 +100,33 @@ class CanopyWaveClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    def _provider_creds(self, provider: str | None) -> tuple[str, str]:
+        """Resolve (base_url, api_key) for a logical provider name.
+
+        Recognised providers: ``"canopywave"`` (default text route) and
+        ``"openrouter"`` (the same provider used for vision/inline). Anything
+        else falls back to the canopywave defaults.
+        """
+        if provider == "openrouter":
+            return self.vision_base_url, self.vision_api_key
+        return self.base_url, self.api_key
+
     async def chat(
         self,
         messages: list[ChatMessage] | list[dict[str, Any]],
         *,
         model: str | None = None,
+        provider: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
     ) -> str:
-        """Plain text chat completion. Returns assistant's text content."""
+        """Plain text chat completion. Returns assistant's text content.
+
+        ``provider`` selects the upstream API: ``"canopywave"`` (default) or
+        ``"openrouter"``. The same OpenRouter credentials used for vision are
+        reused when ``provider="openrouter"``.
+        """
         msg_list: list[dict[str, Any]] = []
         if system_prompt:
             msg_list.append({"role": "system", "content": system_prompt})
@@ -122,7 +139,8 @@ class CanopyWaveClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        return await self._call(payload, base_url=self.base_url, api_key=self.api_key)
+        base_url, api_key = self._provider_creds(provider)
+        return await self._call(payload, base_url=base_url, api_key=api_key)
 
     async def chat_inline(
         self,

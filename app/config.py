@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     webhook_path: str = Field(default="/webhook")
     webhook_secret: str = Field(default="")
 
+    # Self-ping keep-alive: when running on a Render Free plan, the service spins
+    # down after 15 min without inbound HTTP. A small background task here pings
+    # `<keepalive_url>` every `keepalive_interval` seconds (recommended 600 = 10 min)
+    # so the inbound traffic counter never resets. If `keepalive_url` is empty
+    # but `webhook_base_url` is set, we fall back to <webhook_base_url>/api/health.
+    keepalive_url: str = Field(default="")
+    keepalive_interval: float = Field(default=600.0)
+
     allowed_user_ids: str = Field(
         default="",
         description="Comma-separated Telegram user IDs allowed to use the bot. Empty = public.",

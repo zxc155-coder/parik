@@ -24,12 +24,20 @@ from aiogram.types import (
 )
 
 from app.ai_client import AIError, CanopyWaveClient, clean_response
+from app.bot.models_registry import AVAILABLE_MODELS, ModelChoice, get_by_id, get_default
 
 logger = logging.getLogger(__name__)
 
 # Per-chat rolling history of recent messages (text only). Keeps memory bounded.
 _HISTORY_MAX = 12
 _history: dict[int, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=_HISTORY_MAX))
+
+# Per-chat selected text model. Falls back to the registry default when missing.
+_chat_model: dict[int, ModelChoice] = {}
+
+
+def _model_for(chat_id: int) -> ModelChoice:
+    return _chat_model.get(chat_id, get_default())
 
 # Cache mapping inline result_id -> (query_text, expires_at). The chosen_inline_result
 # handler reads from here to look up the original question. ~5 min TTL.
@@ -109,12 +117,14 @@ def build_router(
         )
         if webapp_url:
             text += "• 🚀 Открыть полноценный чат-интерфейс через кнопку ниже\n"
-        text += "\nКоманды: /reset — очистить контекст, /help — справка."
+        text += "\nКоманды: /model — выбрать модель, /reset — очистить контекст, /help — справка."
+        text += f"\nСейчас отвечаю моделью: <b>{_escape_html(_model_for(message.chat.id).label)}</b>"
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
     HELP_TEXT = (
         "Просто напиши вопрос или пришли фото — я отвечу.\n"
         "В любом другом чате: <code>@zabolotrobot вопрос</code> — мой ответ появится прямо там.\n"
+        "/model — выбрать модель для текстовых ответов.\n"
         "/reset — забыть историю разговора."
     )
 
@@ -138,6 +148,70 @@ def build_router(
     async def on_reset(message: Message) -> None:
         _history.pop(message.chat.id, None)
         await message.answer("🧹 Контекст разговора очищен.")
+
+    def _models_keyboard(current_id: str) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        for m in AVAILABLE_MODELS:
+            mark = "✅ " if m.id == current_id else ""
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{mark}{m.label}",
+                        callback_data=f"model:{m.id}",
+                    )
+                ]
+            )
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @router.message(Command("model"))
+    async def on_model(message: Message) -> None:
+        if not _is_allowed(message.from_user.id if message.from_user else None, allowed):
+            return
+        current = _model_for(message.chat.id)
+        text_lines = [
+            f"🧩 <b>Текущая модель для текста:</b> {_escape_html(current.label)}",
+            "",
+            "Выбери другую:",
+            "",
+        ]
+        for m in AVAILABLE_MODELS:
+            text_lines.append(f"• <b>{_escape_html(m.label)}</b> — {_escape_html(m.description)}")
+        await message.answer(
+            "\n".join(text_lines),
+            reply_markup=_models_keyboard(current.id),
+            parse_mode="HTML",
+        )
+
+    @router.callback_query(F.data.startswith("model:"))
+    async def on_model_callback(callback: CallbackQuery) -> None:
+        data = callback.data or ""
+        model_id = data[len("model:"):]
+        choice = get_by_id(model_id)
+        if choice is None:
+            try:
+                await callback.answer("Неизвестная модель", show_alert=True)
+            except TelegramBadRequest:
+                pass
+            return
+        chat_id = callback.message.chat.id if callback.message else None
+        if chat_id is None:
+            try:
+                await callback.answer()
+            except TelegramBadRequest:
+                pass
+            return
+        _chat_model[chat_id] = choice
+        try:
+            await callback.answer(f"Модель: {choice.label}")
+        except TelegramBadRequest:
+            pass
+        try:
+            if callback.message:
+                await callback.message.edit_reply_markup(
+                    reply_markup=_models_keyboard(choice.id)
+                )
+        except TelegramBadRequest:
+            pass
 
     @router.message(F.photo)
     async def on_photo(message: Message, bot: Bot) -> None:
@@ -192,8 +266,13 @@ def build_router(
 
         history = _history_for(message.chat.id)
         history.append({"role": "user", "content": text})
+        choice = _model_for(message.chat.id)
         try:
-            answer = await ai.chat(history)  # type: ignore[arg-type]
+            answer = await ai.chat(
+                history,  # type: ignore[arg-type]
+                model=choice.id,
+                provider=choice.provider,
+            )
         except Exception as exc:
             logger.exception("text call failed")
             await message.answer(f"Ошибка нейросети: {exc}")
