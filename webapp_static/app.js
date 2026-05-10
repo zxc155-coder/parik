@@ -38,7 +38,12 @@
   const modelPillLabel = document.getElementById("model-pill-label");
   const modelSheet = document.getElementById("model-sheet");
   const modelList = document.getElementById("model-list");
+  const modelEmpty = document.getElementById("model-empty");
+  const modelCount = document.getElementById("model-count");
+  const modelSearch = document.getElementById("model-search");
+  const modelTabs = document.getElementById("model-tabs");
   const quickActions = document.getElementById("quick-actions");
+  const scrollBottomBtn = document.getElementById("scroll-bottom");
 
   /* ───── State ───── */
   const HISTORY_MAX = 16;
@@ -47,6 +52,8 @@
   let attachedImage = null; // { dataUrl, mime, base64 }
   let availableModels = [];
   let currentModelId = null;
+  let modelFilter = "all";
+  let modelQuery = "";
 
   /* ───── Helpers ───── */
   function autoresize() {
@@ -92,6 +99,47 @@
     });
   }
 
+  function isNearBottom() {
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  }
+
+  function updateScrollButton() {
+    if (!scrollBottomBtn) return;
+    scrollBottomBtn.hidden = isNearBottom();
+  }
+
+  if (messagesEl) {
+    messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
+  }
+  if (scrollBottomBtn) {
+    scrollBottomBtn.addEventListener("click", function () {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+  }
+
+  async function copyToClipboard(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {}
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "absolute";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function appendMessage(role, text, options) {
     clearWelcome();
     options = options || {};
@@ -124,9 +172,46 @@
     }
 
     if (role !== "error") row.appendChild(avatar);
-    row.appendChild(bubble);
+
+    // Copy button on bot bubbles (skip typing / error / empty).
+    if (role === "bot" && text && !options.typing) {
+      const actions = document.createElement("div");
+      actions.className = "msg-actions";
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "msg-action";
+      copyBtn.title = "Скопировать";
+      copyBtn.setAttribute("aria-label", "Скопировать ответ");
+      copyBtn.innerHTML =
+        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+      copyBtn.addEventListener("click", async function () {
+        const ok = await copyToClipboard(text);
+        if (ok) {
+          copyBtn.classList.add("copied");
+          copyBtn.innerHTML = "✓";
+          setTimeout(function () {
+            copyBtn.classList.remove("copied");
+            copyBtn.innerHTML =
+              '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+          }, 1400);
+          if (tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged) {
+            try { tg.HapticFeedback.selectionChanged(); } catch (_) {}
+          }
+        }
+      });
+      actions.appendChild(copyBtn);
+      const wrap = document.createElement("div");
+      wrap.className = "bubble-wrap";
+      wrap.appendChild(bubble);
+      wrap.appendChild(actions);
+      row.appendChild(wrap);
+    } else {
+      row.appendChild(bubble);
+    }
+
     messagesEl.appendChild(row);
     scrollToBottom();
+    updateScrollButton();
     return row;
   }
 
@@ -217,10 +302,36 @@
     if (m && modelPillLabel) modelPillLabel.textContent = m.label;
   }
 
+  function modelMatchesFilter(m, filter) {
+    if (filter === "all") return true;
+    if (filter === "free") return m.badge === "free";
+    if (filter === "reasoning") return m.badge === "reasoning" || /reasoning/i.test(m.description || "");
+    if (filter === "fast") return m.speed === "fast";
+    return m.provider === filter;
+  }
+
+  function modelMatchesQuery(m, q) {
+    if (!q) return true;
+    const haystack = (m.label + " " + m.id + " " + (m.description || "") + " " + (m.provider || "")).toLowerCase();
+    return haystack.indexOf(q) !== -1;
+  }
+
   function renderModelList() {
     if (!modelList) return;
     modelList.innerHTML = "";
-    availableModels.forEach(function (m) {
+    const filtered = availableModels.filter(function (m) {
+      return modelMatchesFilter(m, modelFilter) && modelMatchesQuery(m, modelQuery);
+    });
+
+    if (modelCount) {
+      modelCount.textContent =
+        filtered.length === availableModels.length
+          ? availableModels.length + " моделей доступно"
+          : filtered.length + " из " + availableModels.length;
+    }
+    if (modelEmpty) modelEmpty.hidden = filtered.length > 0;
+
+    filtered.forEach(function (m) {
       const card = document.createElement("button");
       card.type = "button";
       card.className = "model-card" + (m.id === currentModelId ? " active" : "");
@@ -236,6 +347,11 @@
 
       const badges = document.createElement("div");
       badges.className = "model-badges";
+
+      const providerBadge = document.createElement("span");
+      providerBadge.className = "badge provider-" + (m.provider || "");
+      providerBadge.textContent = m.provider === "canopywave" ? "Canopy" : (m.provider || "");
+      badges.appendChild(providerBadge);
 
       if (m.badge) {
         const b = document.createElement("span");
@@ -267,6 +383,27 @@
       });
 
       modelList.appendChild(card);
+    });
+  }
+
+  if (modelSearch) {
+    modelSearch.addEventListener("input", function () {
+      modelQuery = (modelSearch.value || "").toLowerCase().trim();
+      renderModelList();
+    });
+  }
+  if (modelTabs) {
+    modelTabs.addEventListener("click", function (e) {
+      const btn = e.target.closest(".tab");
+      if (!btn) return;
+      modelFilter = btn.getAttribute("data-filter") || "all";
+      const tabs = modelTabs.querySelectorAll(".tab");
+      for (let i = 0; i < tabs.length; i++) tabs[i].classList.remove("active");
+      btn.classList.add("active");
+      renderModelList();
+      if (tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged) {
+        try { tg.HapticFeedback.selectionChanged(); } catch (_) {}
+      }
     });
   }
 

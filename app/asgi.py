@@ -123,6 +123,7 @@ def _build_app() -> FastAPI:
         text_model=settings.text_model,
         vision_model=settings.vision_model,
         vision_api_key=settings.vision_api_key,
+        vision_api_keys=settings.openrouter_keys,
         vision_base_url=settings.vision_base_url,
         inline_model=settings.inline_model,
         inline_api_key=settings.inline_api_key,

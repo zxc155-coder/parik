@@ -63,7 +63,14 @@ class AIError(RuntimeError):
 
 
 class CanopyWaveClient:
-    """Tiny OpenAI-compatible client targeting Canopy Wave (optionally a separate vision provider)."""
+    """Tiny OpenAI-compatible client targeting Canopy Wave (optionally a separate vision provider).
+
+    Supports a *pool* of API keys per upstream provider so we can transparently
+    fail over to the next key when the current one returns 429 / "rate limit".
+    OpenRouter's free tier in particular shares a per-account daily quota, so
+    rotating across multiple OpenRouter accounts effectively multiplies the
+    available daily request budget.
+    """
 
     def __init__(
         self,
@@ -72,6 +79,7 @@ class CanopyWaveClient:
         text_model: str = "minimax/minimax-m2.5",
         vision_model: str = "zai/glm-5.1",
         vision_api_key: str | None = None,
+        vision_api_keys: list[str] | None = None,
         vision_base_url: str | None = None,
         inline_model: str = "openai/gpt-oss-20b:free",
         inline_api_key: str | None = None,
@@ -82,7 +90,26 @@ class CanopyWaveClient:
         self.base_url = base_url.rstrip("/")
         self.text_model = text_model
         self.vision_model = vision_model
-        self.vision_api_key = (vision_api_key or "").strip() or api_key
+
+        # Build the OpenRouter key pool. If a multi-key list was provided, use it
+        # verbatim (deduped). Otherwise fall back to the single vision_api_key.
+        pool: list[str] = []
+        seen: set[str] = set()
+        for k in vision_api_keys or []:
+            kk = (k or "").strip()
+            if kk and kk not in seen:
+                seen.add(kk)
+                pool.append(kk)
+        single_vision = (vision_api_key or "").strip()
+        if single_vision and single_vision not in seen:
+            seen.add(single_vision)
+            pool.append(single_vision)
+        if not pool:
+            pool = [api_key]
+        self._openrouter_keys: list[str] = pool
+        self._openrouter_idx = 0
+        # Public attribute kept for backwards compat: returns the *first* key.
+        self.vision_api_key = pool[0]
         self.vision_base_url = ((vision_base_url or "").strip() or base_url).rstrip("/")
         # Inline routing defaults to the vision provider (typically OpenRouter)
         # because that's where the FAST free models live; override individually
@@ -97,6 +124,12 @@ class CanopyWaveClient:
             headers={"Content-Type": "application/json"},
         )
 
+    def _next_openrouter_key(self) -> str:
+        """Return the next key in the pool (round-robin)."""
+        key = self._openrouter_keys[self._openrouter_idx % len(self._openrouter_keys)]
+        self._openrouter_idx += 1
+        return key
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -105,10 +138,12 @@ class CanopyWaveClient:
 
         Recognised providers: ``"canopywave"`` (default text route) and
         ``"openrouter"`` (the same provider used for vision/inline). Anything
-        else falls back to the canopywave defaults.
+        else falls back to the canopywave defaults. For OpenRouter we round
+        robin across the configured key pool so successive requests don't all
+        hammer a single account's free-tier quota.
         """
         if provider == "openrouter":
-            return self.vision_base_url, self.vision_api_key
+            return self.vision_base_url, self._next_openrouter_key()
         return self.base_url, self.api_key
 
     async def chat(
@@ -222,25 +257,62 @@ class CanopyWaveClient:
         timeout: float | None = None,
     ) -> str:
         url = f"{base_url}/chat/completions"
-        try:
-            resp = await self._client.post(
-                url,
-                json=payload,
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=timeout if timeout is not None else self._client.timeout,
-            )
-        except httpx.HTTPError as exc:
-            logger.error("HTTP error calling AI: %s", exc)
-            raise
+        is_openrouter = base_url.rstrip("/") == self.vision_base_url.rstrip("/")
+        # On OpenRouter try every key in the pool before giving up so a single
+        # quota-exhausted account doesn't break the whole call.
+        keys_to_try: list[str]
+        if is_openrouter and len(self._openrouter_keys) > 1:
+            keys_to_try = [api_key]
+            for k in self._openrouter_keys:
+                if k not in keys_to_try:
+                    keys_to_try.append(k)
+        else:
+            keys_to_try = [api_key]
 
-        if resp.status_code != 200:
-            logger.error("AI API error %s: %s", resp.status_code, resp.text[:500])
-            raise AIError(resp.status_code, resp.text[:500])
+        last_exc: AIError | None = None
+        for idx, k in enumerate(keys_to_try):
+            try:
+                resp = await self._client.post(
+                    url,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {k}"},
+                    timeout=timeout if timeout is not None else self._client.timeout,
+                )
+            except httpx.HTTPError as exc:
+                logger.error("HTTP error calling AI: %s", exc)
+                raise
 
-        data = resp.json()
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError(f"AI response had no choices: {data}")
-        msg = choices[0].get("message", {}) or {}
-        content = msg.get("content") or ""
-        return clean_response(content)
+            if resp.status_code == 200:
+                data = resp.json()
+                choices = data.get("choices") or []
+                if not choices:
+                    raise RuntimeError(f"AI response had no choices: {data}")
+                msg = choices[0].get("message", {}) or {}
+                content = (msg.get("content") or "").strip()
+                # Some reasoning models (gpt-oss, glm, nemotron, ring) emit only
+                # the chain-of-thought into ``reasoning`` and leave ``content``
+                # empty. In that case surface the reasoning text instead so the
+                # user actually sees an answer.
+                if not content:
+                    reasoning = (msg.get("reasoning") or "").strip()
+                    if reasoning:
+                        content = reasoning
+                return clean_response(content)
+
+            body_short = resp.text[:500]
+            err = AIError(resp.status_code, body_short)
+            # Retry only on 429 or "rate limit" errors when more keys remain.
+            retryable = resp.status_code == 429 or "rate limit" in body_short.lower()
+            if retryable and idx + 1 < len(keys_to_try):
+                logger.warning(
+                    "OpenRouter key #%d hit rate limit (%s); trying next key",
+                    idx + 1,
+                    resp.status_code,
+                )
+                last_exc = err
+                continue
+            logger.error("AI API error %s: %s", resp.status_code, body_short)
+            raise err
+        # Exhausted the pool without a 200 — re-raise the last error.
+        assert last_exc is not None
+        raise last_exc

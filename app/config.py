@@ -24,8 +24,13 @@ class Settings(BaseSettings):
     vision_model: str = Field(default="zai/glm-5.1")
 
     # Optional separate provider for vision (e.g. OpenRouter). If unset, the same
-    # canopywave_api_key + canopywave_base_url are used.
+    # canopywave_api_key + canopywave_base_url are used. ``vision_api_keys`` may be
+    # comma-separated to enable round-robin / failover across multiple OpenRouter
+    # keys — useful for working around the free-tier daily quota by spreading
+    # calls across several accounts. ``vision_api_key`` (singular) is kept for
+    # backwards compat and used when ``vision_api_keys`` is empty.
     vision_api_key: str = Field(default="")
+    vision_api_keys: str = Field(default="")
     vision_base_url: str = Field(default="")
 
     # Inline mode uses a deliberately FAST model so we answer within Telegram's
@@ -66,6 +71,22 @@ class Settings(BaseSettings):
         if not self.allowed_user_ids.strip():
             return set()
         return {int(x.strip()) for x in self.allowed_user_ids.split(",") if x.strip()}
+
+    @property
+    def openrouter_keys(self) -> list[str]:
+        """All OpenRouter keys to round-robin over (vision_api_keys ∪ vision_api_key)."""
+        keys: list[str] = []
+        seen: set[str] = set()
+        for raw in (self.vision_api_keys or "").split(","):
+            k = raw.strip()
+            if k and k not in seen:
+                seen.add(k)
+                keys.append(k)
+        single = (self.vision_api_key or "").strip()
+        if single and single not in seen:
+            seen.add(single)
+            keys.append(single)
+        return keys
 
 
 def load_settings() -> Settings:
