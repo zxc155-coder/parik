@@ -165,10 +165,12 @@ def _build_app() -> FastAPI:
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
             else:
-                try:
-                    await bot.delete_webhook()
-                except Exception:  # noqa: BLE001
-                    logger.exception("delete_webhook failed during shutdown")
+                # Do NOT delete the webhook on shutdown. On platforms with
+                # rolling deploys (Render), the new instance calls set_webhook
+                # before the old one stops; deleting here would race and leave
+                # Telegram with no webhook URL — making the bot silent until
+                # the next forced redeploy. Webhooks persist across restarts;
+                # the next instance simply overwrites it on startup.
                 await bot.session.close()
             await ai.aclose()
 
