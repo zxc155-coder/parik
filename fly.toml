@@ -1,0 +1,29 @@
+# Fly.io deployment config. See https://fly.io/docs/reference/configuration/
+# Usage:
+#   fly launch --no-deploy --copy-config           # the first time
+#   fly secrets set BOT_TOKEN=... CANOPYWAVE_API_KEY=... \
+#     VISION_API_KEY=... VISION_BASE_URL=... VISION_MODEL=...
+#   fly deploy
+
+app = "zabolot-bot"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8000"
+  CANOPYWAVE_BASE_URL = "https://api.canopywave.io/v1"
+  TEXT_MODEL = "minimax/minimax-m2.5"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
