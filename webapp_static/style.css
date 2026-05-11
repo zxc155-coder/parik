@@ -802,6 +802,10 @@ body::after {
   background: rgba(125, 90, 255, 0.16);
   color: #c8b6ff;
 }
+.model-card .badge.provider-ecomagent {
+  background: rgba(255, 145, 77, 0.18);
+  color: #ffb784;
+}
 .model-card .check {
   width: 18px;
   height: 18px;

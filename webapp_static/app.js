@@ -350,7 +350,12 @@
 
       const providerBadge = document.createElement("span");
       providerBadge.className = "badge provider-" + (m.provider || "");
-      providerBadge.textContent = m.provider === "canopywave" ? "Canopy" : (m.provider || "");
+      providerBadge.textContent =
+        m.provider === "canopywave"
+          ? "Canopy"
+          : m.provider === "ecomagent"
+          ? "Claude"
+          : (m.provider || "");
       badges.appendChild(providerBadge);
 
       if (m.badge) {

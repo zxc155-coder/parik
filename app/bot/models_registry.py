@@ -43,6 +43,23 @@ class ModelChoice:
 # We curate a diverse mix: reasoning models (slow, smart), instant models
 # (fast, terse), and balanced models. All tested against the active keys.
 AVAILABLE_MODELS: tuple[ModelChoice, ...] = (
+    # ── ecomagent.in (Claude Opus / Cursor LM proxy) ────────────────────────
+    ModelChoice(
+        id="claude-opus-4-6",
+        label="👑 Claude Opus 4.6",
+        provider="ecomagent",
+        description="Топовая модель Anthropic — Claude Opus 4.6. Глубокие, развёрнутые ответы.",
+        speed="slow",
+        badge="reasoning",
+    ),
+    ModelChoice(
+        id="cursorlm",
+        label="🖱️ Cursor LM",
+        provider="ecomagent",
+        description="Модель из Cursor IDE. Хорошо подходит для кода и длинных промптов.",
+        speed="medium",
+        badge="reasoning",
+    ),
     # ── Canopy Wave (the user's paid key — most reliable) ───────────────────
     ModelChoice(
         id="minimax/minimax-m2.5",

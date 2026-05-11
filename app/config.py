@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     inline_base_url: str = Field(default="")
     inline_timeout: float = Field(default=8.0)
 
+    # Optional third provider: ecomagent.in — a Claude-Opus/Cursor-LM proxy
+    # exposing an OpenAI-compatible chat-completions endpoint. When the key is
+    # set, models tagged with provider="ecomagent" in models_registry can be
+    # selected via /model and the Web App picker.
+    ecomagent_api_key: str = Field(default="")
+    ecomagent_base_url: str = Field(default="https://api.ecomagent.in/v1")
+
     webapp_url: str = Field(default="", description="Public HTTPS URL of the Web App")
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)

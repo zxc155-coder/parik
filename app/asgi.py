@@ -128,6 +128,8 @@ def _build_app() -> FastAPI:
         inline_model=settings.inline_model,
         inline_api_key=settings.inline_api_key,
         inline_base_url=settings.inline_base_url,
+        ecomagent_api_key=settings.ecomagent_api_key,
+        ecomagent_base_url=settings.ecomagent_base_url,
     )
 
     static_dir = Path(__file__).resolve().parent.parent / "webapp_static"

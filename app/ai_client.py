@@ -84,6 +84,8 @@ class CanopyWaveClient:
         inline_model: str = "openai/gpt-oss-20b:free",
         inline_api_key: str | None = None,
         inline_base_url: str | None = None,
+        ecomagent_api_key: str | None = None,
+        ecomagent_base_url: str | None = None,
         timeout: float = 120.0,
     ) -> None:
         self.api_key = api_key
@@ -119,6 +121,11 @@ class CanopyWaveClient:
         self.inline_base_url = (
             (inline_base_url or "").strip() or self.vision_base_url
         ).rstrip("/")
+        # ecomagent.in (Claude Opus / Cursor LM proxy). Optional third provider.
+        self.ecomagent_api_key = (ecomagent_api_key or "").strip()
+        self.ecomagent_base_url = (
+            (ecomagent_base_url or "").strip() or "https://api.ecomagent.in/v1"
+        ).rstrip("/")
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={"Content-Type": "application/json"},
@@ -136,14 +143,17 @@ class CanopyWaveClient:
     def _provider_creds(self, provider: str | None) -> tuple[str, str]:
         """Resolve (base_url, api_key) for a logical provider name.
 
-        Recognised providers: ``"canopywave"`` (default text route) and
-        ``"openrouter"`` (the same provider used for vision/inline). Anything
-        else falls back to the canopywave defaults. For OpenRouter we round
-        robin across the configured key pool so successive requests don't all
-        hammer a single account's free-tier quota.
+        Recognised providers: ``"canopywave"`` (default text route),
+        ``"openrouter"`` (used for vision/inline + free OpenRouter models)
+        and ``"ecomagent"`` (Claude Opus / Cursor LM proxy at ecomagent.in).
+        Anything else falls back to the canopywave defaults. For OpenRouter
+        we round robin across the configured key pool so successive requests
+        don't all hammer a single account's free-tier quota.
         """
         if provider == "openrouter":
             return self.vision_base_url, self._next_openrouter_key()
+        if provider == "ecomagent" and self.ecomagent_api_key:
+            return self.ecomagent_base_url, self.ecomagent_api_key
         return self.base_url, self.api_key
 
     async def chat(
